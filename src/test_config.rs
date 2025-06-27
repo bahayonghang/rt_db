@@ -32,7 +32,7 @@ pub fn test_connection_string_parsing() -> Result<()> {
         }
     }
     
-    // 测试包含中文的连接字符串
+    // 测试包含中文的连接字符串（URL编码格式）
     let chinese_connection_string = "server=tcp:localhost,1433;database=%E6%8E%A7%E5%88%B6%E5%99%A8%E6%95%B0%E6%8D%AE%E5%BA%93;user=sa;password=test123;TrustServerCertificate=true";
     println!("\n测试中文数据库名连接字符串: {}", chinese_connection_string);
     

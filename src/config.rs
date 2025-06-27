@@ -62,7 +62,7 @@ pub struct DatabaseConfig {
 impl DatabaseConfig {
     /// 生成数据库连接字符串
     pub fn to_connection_string(&self) -> String {
-        // 对数据库名进行URL编码以支持中文字符
+        // 对数据库名、用户名和密码进行URL编码以支持中文字符
         let encoded_database = urlencoding::encode(&self.database);
         let encoded_user = urlencoding::encode(&self.user);
         let encoded_password = urlencoding::encode(&self.password);

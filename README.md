@@ -13,17 +13,159 @@
 
 ## 系统架构
 
+### 整体架构图
+
+```mermaid
+graph TB
+    subgraph "上游数据源 (SQL Server)"
+        HT["历史表<br/>(初始数据加载)"]
+        TDB["TagDatabase表<br/>(增量更新)"]
+    end
+    
+    subgraph "Rust 数据同步服务"
+        subgraph "核心模块"
+            CFG["配置模块<br/>(config.rs)"]
+            DS["数据源模块<br/>(data_source.rs)"]
+            DB["数据库管理<br/>(database.rs)"]
+            SYNC["同步服务<br/>(sync_service.rs)"]
+            MAIN["主程序<br/>(main.rs)"]
+        end
+        
+        subgraph "数据处理流程"
+            INIT["初始数据加载"]
+            PERIOD["周期性更新"]
+            CLEAN["过期数据清理"]
+        end
+    end
+    
+    subgraph "本地存储 (DuckDB)"
+        DUCK[("realtime_data.duckdb<br/>ts_data表")]
+        IDX["索引: idx_tag_ts<br/>(tag_name, ts)"]
+    end
+    
+    subgraph "数据消费端"
+        PY["Python 脚本"]
+        DBA["DBeaver"]
+        OTHER["其他分析工具"]
+    end
+    
+    %% 数据流连接
+    HT -->|"全量拉取<br/>(启动时)"| DS
+    TDB -->|"增量拉取<br/>(10秒周期)"| DS
+    
+    DS --> SYNC
+    SYNC --> DB
+    DB --> DUCK
+    DUCK --> IDX
+    
+    %% 查询连接
+    DUCK -.->|"只读访问"| PY
+    DUCK -.->|"只读访问"| DBA
+    DUCK -.->|"只读访问"| OTHER
+    
+    %% 配置连接
+    CFG -.-> DS
+    CFG -.-> DB
+    CFG -.-> SYNC
+    
+    %% 主程序协调
+    MAIN --> CFG
+    MAIN --> INIT
+    MAIN --> PERIOD
+    MAIN --> CLEAN
+    
+    %% 样式定义
+    classDef sqlserver fill:#e1f5fe
+    classDef rust fill:#fff3e0
+    classDef duckdb fill:#f3e5f5
+    classDef consumer fill:#e8f5e8
+    
+    class HT,TDB sqlserver
+    class CFG,DS,DB,SYNC,MAIN,INIT,PERIOD,CLEAN rust
+    class DUCK,IDX duckdb
+    class PY,DBA,OTHER consumer
 ```
-┌─────────────────┐    ┌─────────────────┐    ┌─────────────────┐
-│   SQL Server    │───▶│   Rust Service  │───▶│   DuckDB File   │
-│   (上游数据源)   │    │   (数据同步服务) │    │   (本地缓存)     │
-└─────────────────┘    └─────────────────┘    └─────────────────┘
-                                                        │
-                                                        ▼
-                                               ┌─────────────────┐
-                                               │ Python/分析工具  │
-                                               │   (数据消费者)   │
-                                               └─────────────────┘
+
+### 数据流时序图
+
+```mermaid
+sequenceDiagram
+    participant SQL as SQL Server
+    participant RS as Rust Service
+    participant Duck as DuckDB
+    participant Client as 客户端工具
+    
+    Note over RS: 服务启动
+    RS->>Duck: 删除旧数据库文件
+    RS->>Duck: 创建新表和索引
+    
+    Note over RS: 初始数据加载
+    RS->>SQL: 查询历史表(最近3天)
+    SQL-->>RS: 返回历史数据
+    RS->>Duck: 批量插入数据
+    
+    Note over RS: 周期性更新(每10秒)
+    loop 每10秒
+        RS->>SQL: 查询TagDatabase(增量)
+        SQL-->>RS: 返回新数据
+        alt 有新数据
+            RS->>Duck: 插入新数据
+        end
+        RS->>Duck: 清理过期数据(>3天)
+    end
+    
+    Note over Client: 数据查询
+    Client->>Duck: 只读查询
+    Duck-->>Client: 返回结果
+```
+
+### 核心组件交互图
+
+```mermaid
+graph LR
+    subgraph "配置层"
+        CONFIG["config.toml"]
+        APPCONFIG["AppConfig结构体"]
+    end
+    
+    subgraph "数据访问层"
+        SQLCONN["SQL Server连接"]
+        DUCKCONN["DuckDB连接"]
+    end
+    
+    subgraph "业务逻辑层"
+        DATASOURCE["SqlServerDataSource"]
+        DBMANAGER["DatabaseManager"]
+        SYNCSERVICE["SyncService"]
+    end
+    
+    subgraph "数据模型"
+        TSRECORD["TimeSeriesRecord"]
+    end
+    
+    CONFIG --> APPCONFIG
+    APPCONFIG --> DATASOURCE
+    APPCONFIG --> DBMANAGER
+    APPCONFIG --> SYNCSERVICE
+    
+    DATASOURCE --> SQLCONN
+    DBMANAGER --> DUCKCONN
+    
+    SQLCONN --> TSRECORD
+    TSRECORD --> DUCKCONN
+    
+    SYNCSERVICE --> DATASOURCE
+    SYNCSERVICE --> DBMANAGER
+    
+    classDef config fill:#fff2cc
+    classDef data fill:#d5e8d4
+    classDef business fill:#dae8fc
+    classDef model fill:#f8cecc
+    
+    class CONFIG,APPCONFIG config
+    class SQLCONN,DUCKCONN data
+    class DATASOURCE,DBMANAGER,SYNCSERVICE business
+    class TSRECORD model
 ```
 
 ## 快速开始

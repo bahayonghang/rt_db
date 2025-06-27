@@ -2,6 +2,7 @@ mod config;
 mod database;
 mod data_source;
 mod sync_service;
+mod test_config;
 
 use anyhow::Result;
 use std::sync::Arc;
@@ -16,6 +17,15 @@ use sync_service::SyncService;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // 检查命令行参数
+    let args: Vec<String> = std::env::args().collect();
+    
+    // 如果参数包含 --test-config，运行配置测试
+    if args.len() > 1 && args[1] == "--test-config" {
+        println!("运行配置解析测试...");
+        return test_config::run_all_tests();
+    }
+    
     // 加载配置
     let config = match AppConfig::load("config.toml") {
         Ok(config) => {
@@ -23,6 +33,7 @@ async fn main() -> Result<()> {
         }
         Err(e) => {
             eprintln!("配置加载失败: {}", e);
+            eprintln!("提示: 可以运行 'cargo run -- --test-config' 来测试配置解析功能");
             return Err(e);
         }
     };

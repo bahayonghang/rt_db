@@ -21,16 +21,18 @@ impl SqlServerDataSource {
     
     /// 创建数据库连接
     async fn create_connection(&self) -> Result<Client<Compat<TcpStream>>> {
-        let connection_string = self.config.database.to_connection_string();
+        let database_config = self.config.get_database_config()?;
+        let connection_string = database_config.to_connection_string();
         info!("尝试连接 SQL Server，连接字符串: {}", connection_string);
         
         // 记录数据库配置详情
         info!("数据库配置详情:");
-        info!("  服务器: {}:{}", self.config.database.server, self.config.database.port);
-        info!("  数据库: {}", self.config.database.database);
-        info!("  用户名: {}", self.config.database.user);
-        info!("  密码长度: {} 字符", self.config.database.password.len());
-        info!("  信任证书: {}", self.config.database.trust_server_certificate);
+        info!("  连接方式: {:?}", self.config.database_connection_type);
+        info!("  服务器: {}:{}", database_config.server, database_config.port);
+        info!("  数据库: {}", database_config.database);
+        info!("  用户名: {}", database_config.user);
+        info!("  密码长度: {} 字符", database_config.password.len());
+        info!("  信任证书: {}", database_config.trust_server_certificate);
         
         let config = match Config::from_ado_string(&connection_string) {
             Ok(cfg) => {

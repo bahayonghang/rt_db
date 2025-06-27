@@ -1,11 +1,43 @@
 # 实时数据缓存服务配置文件示例
 # 请复制此文件为 config.toml 并修改相应配置
 
+# =============================================================================
+# 数据库连接配置方式选择
+# =============================================================================
+# 可选值:
+#   - "connection_string": 使用连接字符串方式（简单配置）
+#   - "structured_config": 使用结构化配置方式（详细配置）
+database_connection_type = "connection_string"
+
+# =============================================================================
+# 方式一：连接字符串配置（当 database_connection_type = "connection_string" 时使用）
+# =============================================================================
 # SQL Server 数据库连接字符串
-
 # 格式: server=tcp:服务器地址,端口;database=数据库名;user=用户名;password=密码;TrustServerCertificate=true
+# 支持中文数据库名、用户名和密码（会自动进行URL编码处理）
+database_url = "server=tcp:localhost,1433;database=控制器数据库;user=sa;password=123456;TrustServerCertificate=true"
 
-database_url = "server=tcp:localhost,1433;database=IndustryDB;user=sa;password=YourPassword;TrustServerCertificate=true"
+# =============================================================================
+# 方式二：结构化配置（当 database_connection_type = "structured_config" 时使用）
+# =============================================================================
+# 如果选择结构化配置，请注释掉上面的 database_url，并取消注释下面的 [database] 配置
+# [database]
+# # 服务器地址
+# server = "localhost"
+# # 端口号
+# port = 1433
+# # 数据库名（支持中文）
+# database = "控制器数据库"
+# # 用户名
+# user = "sa"
+# # 密码
+# password = "ysdxdckj@666"
+# # 是否信任服务器证书
+# trust_server_certificate = true
+
+# =============================================================================
+# 通用配置（两种方式都需要）
+# =============================================================================
 
 # 增量更新周期，单位为秒
 # 建议值: 10-60秒，根据数据更新频率调整
@@ -22,21 +54,6 @@ db_file_path = "./realtime_data.duckdb"
 # 日志级别 (trace, debug, info, warn, error)
 # 生产环境建议使用 info 或 warn
 log_level = "info"
-
-# SQL Server 数据库连接配置
-[database]
-# 服务器地址
-server = "localhost"
-# 端口号
-port = 1433
-# 数据库名
-database = "控制器数据库"
-# 用户名
-user = "sa"
-# 密码
-password = "ysdxdckj@666"
-# 是否信任服务器证书
-trust_server_certificate = true
 
 # SQL Server 表名配置
 [tables]

@@ -16,22 +16,22 @@ use sync_service::SyncService;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // 初始化日志系统
-    init_logging();
-    
-    info!("=== 实时数据缓存服务启动 ===");
-    
     // 加载配置
     let config = match AppConfig::load("config.toml") {
         Ok(config) => {
-            info!("配置加载成功");
             Arc::new(config)
         }
         Err(e) => {
-            error!("配置加载失败: {}", e);
+            eprintln!("配置加载失败: {}", e);
             return Err(e);
         }
     };
+    
+    // 初始化日志系统
+    init_logging(&config);
+    
+    info!("=== 实时数据缓存服务启动 ===");
+    info!("配置加载成功");
     
     // 初始化数据库管理器
     let db_manager = Arc::new(DatabaseManager::new(config.db_file_path.clone()));
@@ -131,9 +131,9 @@ async fn main() -> Result<()> {
 }
 
 /// 初始化日志系统
-fn init_logging() {
+fn init_logging(config: &AppConfig) {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("info"));
+        .unwrap_or_else(|_| EnvFilter::new(&config.log_level));
     
     tracing_subscriber::registry()
         .with(filter)

@@ -23,7 +23,11 @@ impl SqlServerDataSource {
     async fn create_connection(&self) -> Result<Client<Compat<TcpStream>>> {
         let config = Config::from_ado_string(&self.config.database_url)?;
         
-        let tcp = TcpStream::connect(config.get_addr()).await?;
+        // 设置连接超时
+        let tcp = tokio::time::timeout(
+            Duration::from_secs(self.config.connection.connection_timeout_secs),
+            TcpStream::connect(config.get_addr())
+        ).await??;
         tcp.set_nodelay(true)?;
         
         let client = Client::connect(config, tcp.compat_write()).await?;

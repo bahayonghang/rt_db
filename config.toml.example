@@ -1,0 +1,38 @@
+# 实时数据缓存服务配置文件示例
+# 请复制此文件为 config.toml 并修改相应配置
+
+# SQL Server 数据库连接字符串
+# 格式: server=tcp:服务器地址,端口;database=数据库名;user=用户名;password=密码;TrustServerCertificate=true
+database_url = "server=tcp:localhost,1433;database=IndustryDB;user=sa;password=YourPassword;TrustServerCertificate=true"
+
+# 增量更新周期，单位为秒
+# 建议值: 10-60秒，根据数据更新频率调整
+update_interval_secs = 10
+
+# 数据保留窗口，单位为天
+# 建议值: 1-7天，根据存储空间和查询需求调整
+data_window_days = 3
+
+# 本地 DuckDB 文件路径
+# 可以是相对路径或绝对路径
+db_file_path = "./realtime_data.duckdb"
+
+# 日志级别 (trace, debug, info, warn, error)
+# 生产环境建议使用 info 或 warn
+log_level = "info"
+
+# SQL Server 表名配置
+[tables]
+# 历史数据表名（用于初始数据加载）
+history_table = "历史表"
+# 实时数据表名（用于增量更新）
+tag_database_table = "TagDatabase"
+
+# 数据库连接池配置
+[connection]
+# 连接失败时的最大重试次数
+max_retries = 3
+# 重试间隔，单位为秒
+retry_interval_secs = 5
+# 连接超时，单位为秒
+connection_timeout_secs = 30

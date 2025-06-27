@@ -1,0 +1,16 @@
+[package]
+name = "rt_db"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tiberius = { version = "0.12", features = ["chrono"] }
+duckdb = { version = "1.0", features = ["bundled", "chrono"] }
+chrono = { version = "0.4", features = ["serde"] }
+config = "0.14"
+serde = { version = "1.0", features = ["derive"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+anyhow = "1.0"
+tokio-util = { version = "0.7", features = ["compat"] }

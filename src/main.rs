@@ -5,7 +5,7 @@ mod sync_service;
 
 use anyhow::Result;
 use std::sync::Arc;
-// use tokio::signal; // 已在wait_for_shutdown_signal函数中按需导入
+use tokio::signal; // 已在wait_for_shutdown_signal函数中按需导入
 use tracing::{info, error, warn};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 

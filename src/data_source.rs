@@ -3,7 +3,7 @@ use chrono::{DateTime, Utc};
 use tiberius::{Client, Config, Row};
 use tokio::net::TcpStream;
 use tokio_util::compat::{TokioAsyncWriteCompatExt, Compat};
-use tracing::{info, debug, warn};
+use tracing::{info, debug, warn, error};
 use crate::database::TimeSeriesRecord;
 use crate::config::AppConfig;
 use std::time::Duration;
@@ -21,16 +21,68 @@ impl SqlServerDataSource {
     
     /// 创建数据库连接
     async fn create_connection(&self) -> Result<Client<Compat<TcpStream>>> {
-        let config = Config::from_ado_string(&self.config.database_url)?;
+        let connection_string = self.config.database.to_connection_string();
+        info!("尝试连接 SQL Server，连接字符串: {}", connection_string);
+        
+        // 记录数据库配置详情
+        info!("数据库配置详情:");
+        info!("  服务器: {}:{}", self.config.database.server, self.config.database.port);
+        info!("  数据库: {}", self.config.database.database);
+        info!("  用户名: {}", self.config.database.user);
+        info!("  密码长度: {} 字符", self.config.database.password.len());
+        info!("  信任证书: {}", self.config.database.trust_server_certificate);
+        
+        let config = match Config::from_ado_string(&connection_string) {
+            Ok(cfg) => {
+                info!("连接字符串解析成功");
+                info!("  解析后服务器地址: {:?}", cfg.get_addr());
+                cfg
+            }
+            Err(e) => {
+                error!("连接字符串解析失败: {}", e);
+                return Err(e.into());
+            }
+        };
         
         // 设置连接超时
-        let tcp = tokio::time::timeout(
+        info!("开始建立TCP连接，超时时间: {} 秒", self.config.connection.connection_timeout_secs);
+        let tcp = match tokio::time::timeout(
             Duration::from_secs(self.config.connection.connection_timeout_secs),
             TcpStream::connect(config.get_addr())
-        ).await??;
-        tcp.set_nodelay(true)?;
+        ).await {
+            Ok(Ok(stream)) => {
+                info!("TCP连接建立成功");
+                stream
+            }
+            Ok(Err(e)) => {
+                error!("TCP连接失败: {}", e);
+                return Err(e.into());
+            }
+            Err(_) => {
+                error!("TCP连接超时");
+                return Err(anyhow::anyhow!("TCP连接超时"));
+            }
+        };
         
-        let client = Client::connect(config, tcp.compat_write()).await?;
+        tcp.set_nodelay(true)?;
+        info!("开始SQL Server认证");
+        
+        let client = match Client::connect(config, tcp.compat_write()).await {
+            Ok(c) => {
+                info!("SQL Server认证成功，连接建立完成");
+                c
+            }
+            Err(e) => {
+                error!("SQL Server认证失败: {}", e);
+                error!("可能的原因:");
+                error!("  1. 用户名或密码错误");
+                error!("  2. sa账户被禁用");
+                error!("  3. SQL Server未启用混合模式认证");
+                error!("  4. 数据库不存在或无权限访问");
+                error!("  5. 服务器防火墙阻止连接");
+                return Err(e.into());
+            }
+        };
         
         debug!("成功连接到 SQL Server");
         Ok(client)

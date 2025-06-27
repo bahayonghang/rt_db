@@ -5,8 +5,8 @@ use std::path::Path;
 /// 应用配置结构体
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
-    /// SQL Server 数据库连接字符串
-    pub database_url: String,
+    /// 数据库连接配置
+    pub database: DatabaseConfig,
     /// 增量更新周期，单位为秒
     pub update_interval_secs: u64,
     /// 数据保留窗口，单位为天
@@ -19,6 +19,68 @@ pub struct AppConfig {
     pub tables: TableConfig,
     /// 连接配置
     pub connection: ConnectionConfig,
+}
+
+/// 数据库连接配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct DatabaseConfig {
+    /// 服务器地址
+    pub server: String,
+    /// 端口号
+    pub port: u16,
+    /// 数据库名
+    pub database: String,
+    /// 用户名
+    pub user: String,
+    /// 密码
+    pub password: String,
+    /// 是否信任服务器证书
+    pub trust_server_certificate: bool,
+}
+
+impl DatabaseConfig {
+    /// 生成数据库连接字符串
+    pub fn to_connection_string(&self) -> String {
+        // 对数据库名进行URL编码以支持中文字符
+        let encoded_database = urlencoding::encode(&self.database);
+        let encoded_user = urlencoding::encode(&self.user);
+        let encoded_password = urlencoding::encode(&self.password);
+        
+        format!(
+            "server=tcp:{},{};database={};user={};password={};TrustServerCertificate={}",
+            self.server,
+            self.port,
+            encoded_database,
+            encoded_user,
+            encoded_password,
+            self.trust_server_certificate
+        )
+    }
+    
+    /// 验证数据库配置的有效性
+    fn validate(&self) -> Result<()> {
+        if self.server.is_empty() {
+            anyhow::bail!("数据库服务器地址不能为空");
+        }
+        
+        if self.port == 0 {
+            anyhow::bail!("数据库端口号必须大于 0");
+        }
+        
+        if self.database.is_empty() {
+            anyhow::bail!("数据库名不能为空");
+        }
+        
+        if self.user.is_empty() {
+            anyhow::bail!("数据库用户名不能为空");
+        }
+        
+        if self.password.is_empty() {
+            anyhow::bail!("数据库密码不能为空");
+        }
+        
+        Ok(())
+    }
 }
 
 /// 表名配置
@@ -60,9 +122,7 @@ impl AppConfig {
     
     /// 验证配置的有效性
     fn validate(&self) -> Result<()> {
-        if self.database_url.is_empty() {
-            anyhow::bail!("database_url 不能为空");
-        }
+        self.database.validate()?;
         
         if self.update_interval_secs == 0 {
             anyhow::bail!("update_interval_secs 必须大于 0");

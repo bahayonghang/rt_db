@@ -1,10 +1,6 @@
 # 实时数据缓存服务配置文件示例
 # 请复制此文件为 config.toml 并修改相应配置
 
-# SQL Server 数据库连接字符串
-# 格式: server=tcp:服务器地址,端口;database=数据库名;user=用户名;password=密码;TrustServerCertificate=true
-database_url = "server=tcp:localhost,1433;database=IndustryDB;user=sa;password=YourPassword;TrustServerCertificate=true"
-
 # 增量更新周期，单位为秒
 # 建议值: 10-60秒，根据数据更新频率调整
 update_interval_secs = 10
@@ -20,6 +16,21 @@ db_file_path = "./realtime_data.duckdb"
 # 日志级别 (trace, debug, info, warn, error)
 # 生产环境建议使用 info 或 warn
 log_level = "info"
+
+# SQL Server 数据库连接配置
+[database]
+# 服务器地址
+server = "localhost"
+# 端口号
+port = 1433
+# 数据库名
+database = "控制器数据库"
+# 用户名
+user = "sa"
+# 密码
+password = "ysdxdckj@666"
+# 是否信任服务器证书
+trust_server_certificate = true
 
 # SQL Server 表名配置
 [tables]

@@ -1,0 +1,35 @@
+# 数据库连接配置示例
+# 复制此文件为 config.toml 并修改相应参数
+
+[database]
+# SQL Server 服务器地址
+server = "localhost"
+# 数据库名称
+database = "IndustryDB"
+# 用户名
+username = "your_username"
+# 密码
+password = "your_password"
+# 端口号（可选，默认1433）
+port = 1433
+
+[query]
+# 历史数据表名
+history_table = "HistoryTable"
+# 标签数据表名
+tag_table = "TagDatabase"
+# 查询最近几天的数据
+days_back = 3
+
+# 其他配置示例：
+# [database]
+# server = "192.168.1.100"
+# database = "ProcessData"
+# username = "operator"
+# password = "secure_password"
+# port = 1433
+#
+# [query]
+# history_table = "ProcessHistory"
+# tag_table = "TagMaster"
+# days_back = 7

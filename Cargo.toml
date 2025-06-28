@@ -1,6 +1,6 @@
 [package]
 name = "rt_db"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 
 [dependencies]
@@ -11,7 +11,9 @@ chrono = { version = "0.4", features = ["serde"] }
 config = "0.15.11"
 serde = { version = "1.0", features = ["derive"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "std", "time"] }
+time = { version = "0.3", features = ["formatting", "macros"] }
+tracing-appender = "0.2"
 anyhow = "1.0"
 tokio-util = { version = "0.7", features = ["compat"] }
 urlencoding = "2.1"
@@ -19,3 +21,7 @@ urlencoding = "2.1"
 [[bin]]
 name = "rt_db"
 path = "src/main.rs"
+
+[[bin]]
+name = "check_table"
+path = "src/check_table.rs"

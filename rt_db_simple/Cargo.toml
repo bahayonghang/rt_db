@@ -1,0 +1,15 @@
+[package]
+name = "rt_db_simple"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tokio = { version = "1.0", features = ["full"] }
+tiberius = { version = "0.12", features = ["chrono"] }
+tokio-util = { version = "0.7", features = ["compat"] }
+serde = { version = "1.0", features = ["derive"] }
+toml = "0.8"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1.0"
+env_logger = "0.10"
+log = "0.4"

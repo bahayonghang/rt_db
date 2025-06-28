@@ -1,15 +1,19 @@
-# 实时数据缓存服务 (Real-time Data Cache Service)
+# rt_db
 
-一个高性能的工业时间序列数据缓存服务，用于从 SQL Server 实时同步数据到本地 DuckDB 数据库。
+一个高性能的工业时间序列数据实时同步服务，专为工业数据处理场景设计，支持从 SQL Server 实时同步数据到本地 DuckDB 数据库，并提供宽表格式的高效存储。
 
 ## 功能特性
 
-- **实时数据同步**: 从 SQL Server 定期拉取最新的工业数据
-- **滚动数据窗口**: 自动维护指定天数的数据窗口，自动清理过期数据
-- **高性能存储**: 使用 DuckDB 列式存储，优化时序数据查询性能
+- **实时数据同步**: 从 SQL Server 历史表和 TagDatabase 表定期拉取工业数据
+- **宽表存储**: 自动将时序数据转换为宽表格式，优化查询性能
+- **动态列管理**: 自动检测新标签并动态添加列到宽表
+- **滚动数据窗口**: 自动维护指定天数的数据窗口，定期清理过期数据
+- **高性能存储**: 使用 DuckDB 列式存储，支持高效的时序数据查询
 - **并发访问**: 支持多个客户端同时只读访问本地数据库
-- **容错机制**: 内置重试机制和错误恢复
-- **优雅停机**: 支持信号处理和优雅关闭
+- **容错机制**: 内置重试机制、连接池和错误恢复
+- **优雅停机**: 支持 SIGTERM/SIGINT 信号处理和优雅关闭
+- **结构化日志**: 使用 tracing 框架提供详细的结构化日志
+- **灵活配置**: 支持连接字符串和结构化配置两种模式
 
 ## 系统架构
 
@@ -39,8 +43,8 @@ graph TB
     end
     
     subgraph "本地存储 (DuckDB)"
-        DUCK[("realtime_data.duckdb<br/>ts_data表")]
-        IDX["索引: idx_tag_ts<br/>(tag_name, ts)"]
+        DUCK[("realtime_data.duckdb<br/>ts_wide表")]
+        IDX["索引: idx_datetime<br/>(DateTime)"]
     end
     
     subgraph "数据消费端"
@@ -96,26 +100,28 @@ sequenceDiagram
     participant Client as 客户端工具
     
     Note over RS: 服务启动
-    RS->>Duck: 删除旧数据库文件
-    RS->>Duck: 创建新表和索引
+    RS->>Duck: 初始化数据库和表结构
+    RS->>Duck: 创建ts_wide表和索引
     
     Note over RS: 初始数据加载
-    RS->>SQL: 查询历史表(最近3天)
+    RS->>SQL: 查询历史表(指定天数)
     SQL-->>RS: 返回历史数据
-    RS->>Duck: 批量插入数据
+    RS->>RS: 转换为宽表格式
+    RS->>Duck: 批量插入宽表数据
     
-    Note over RS: 周期性更新(每10秒)
-    loop 每10秒
-        RS->>SQL: 查询TagDatabase(增量)
+    Note over RS: 周期性更新
+    loop 每个更新周期
+        RS->>SQL: 查询TagDatabase增量数据
         SQL-->>RS: 返回新数据
         alt 有新数据
-            RS->>Duck: 插入新数据
+            RS->>Duck: 动态添加新列(如需要)
+            RS->>Duck: 追加新数据到宽表
         end
-        RS->>Duck: 清理过期数据(>3天)
+        RS->>Duck: 清理过期数据
     end
     
     Note over Client: 数据查询
-    Client->>Duck: 只读查询
+    Client->>Duck: 只读查询宽表
     Duck-->>Client: 返回结果
 ```
 
@@ -186,7 +192,12 @@ cp config.toml.example config.toml
 
 编辑 `config.toml`：
 
+#### 方式一：使用连接字符串（推荐）
+
 ```toml
+# 数据库连接方式
+database_connection_type = "ConnectionString"
+
 # SQL Server 数据库连接字符串
 database_url = "server=tcp:your-server,1433;database=YourDatabase;user=YourUser;password=YourPassword;TrustServerCertificate=true"
 
@@ -205,6 +216,50 @@ log_level = "info"
 [tables]
 history_table = "历史表"
 tag_database_table = "TagDatabase"
+
+[query]
+days_back = 3
+history_table = "历史表"
+
+[connection]
+max_retries = 3
+retry_interval_secs = 5
+connection_timeout_secs = 30
+```
+
+#### 方式二：使用结构化配置
+
+```toml
+# 数据库连接方式
+database_connection_type = "StructuredConfig"
+
+# 增量更新周期，单位为秒
+update_interval_secs = 10
+
+# 数据保留窗口，单位为天
+data_window_days = 3
+
+# 本地 DuckDB 文件路径
+db_file_path = "./realtime_data.duckdb"
+
+# 日志级别
+log_level = "info"
+
+[database]
+server = "your-server"
+port = 1433
+database = "YourDatabase"
+user = "YourUser"
+password = "YourPassword"
+trust_server_certificate = true
+
+[tables]
+history_table = "历史表"
+tag_database_table = "TagDatabase"
+
+[query]
+days_back = 3
+history_table = "历史表"
 
 [connection]
 max_retries = 3
@@ -238,16 +293,28 @@ import pandas as pd
 # 连接到本地数据库文件
 conn = duckdb.connect('realtime_data.duckdb', read_only=True)
 
-# 查询最近1小时的数据
+# 查询最近1小时的数据（宽表格式）
 query = """
-SELECT tag_name, ts, value 
-FROM ts_data 
-WHERE ts >= NOW() - INTERVAL '1 hour'
-ORDER BY ts DESC
+SELECT * 
+FROM ts_wide 
+WHERE DateTime >= NOW() - INTERVAL '1 hour'
+ORDER BY DateTime DESC
 """
 
 df = conn.execute(query).fetchdf()
 print(df.head())
+
+# 查询特定标签的数据
+query_specific = """
+SELECT DateTime, tag_1, tag_2
+FROM ts_wide 
+WHERE DateTime >= NOW() - INTERVAL '1 hour'
+  AND (tag_1 IS NOT NULL OR tag_2 IS NOT NULL)
+ORDER BY DateTime DESC
+"""
+
+df_specific = conn.execute(query_specific).fetchdf()
+print(df_specific.head())
 
 conn.close()
 ```
@@ -260,30 +327,47 @@ conn.close()
 
 ## 数据库结构
 
-### ts_data 表
+### ts_wide 表（宽表格式）
 
 | 列名 | 类型 | 描述 |
 |------|------|------|
-| tag_name | VARCHAR | 工业数据点标签名 |
-| ts | TIMESTAMP | 数据时间戳 (UTC) |
-| value | DOUBLE | 数据数值 |
+| DateTime | TIMESTAMP | 数据时间戳 (UTC) |
+| tag_1 | DOUBLE | 工业标签1的数值 |
+| tag_2 | DOUBLE | 工业标签2的数值 |
+| ... | DOUBLE | 其他工业标签的数值 |
+
+**说明**：
+- 宽表结构将每个时间戳的所有标签数据存储在同一行
+- 标签列名会根据实际标签名动态生成，特殊字符会被转换为下划线
+- 如果标签名以数字开头，会自动添加 `tag_` 前缀
+- 缺失的标签值会填充为 NULL
 
 ### 索引
 
-- `idx_tag_ts`: 复合索引 (tag_name, ts)，优化查询和数据清理性能
+- `idx_datetime`: 主索引 (DateTime)，优化时间范围查询和数据清理性能
 
 ## 运维指南
 
 ### 日志管理
 
-服务使用结构化日志，支持以下级别：
+服务使用 `tracing` 框架提供结构化日志，支持以下级别：
 - `ERROR`: 严重错误
 - `WARN`: 警告信息
 - `INFO`: 一般信息
 - `DEBUG`: 调试信息
+- `TRACE`: 详细跟踪信息
+
+**日志输出**：
+- 控制台输出：实时显示日志信息
+- 文件输出：自动按天滚动，保存在 `logs/rt_db.log`
+- 时间格式：北京时间 (UTC+8)
 
 设置日志级别：
 ```bash
+# 通过配置文件
+log_level = "debug"
+
+# 或通过环境变量
 RUST_LOG=debug cargo run
 ```
 
@@ -291,9 +375,16 @@ RUST_LOG=debug cargo run
 
 服务每5分钟输出一次状态报告，包括：
 - 总记录数
-- 最新数据时间
-- 最后同步时间
-- 数据窗口配置
+- 最新数据时间戳
+- 最后同步时间戳
+- 数据窗口配置（天数）
+- 更新间隔配置（秒）
+
+**关键监控指标**：
+- 数据同步频率和延迟
+- 数据库连接状态
+- 内存使用情况
+- 错误重试次数
 
 ### 系统服务部署
 
@@ -361,19 +452,62 @@ sudo systemctl status rt-db
 
 ```
 src/
-├── main.rs           # 主程序入口
-├── config.rs         # 配置管理
-├── database.rs       # DuckDB 数据库操作
-├── data_source.rs    # SQL Server 数据源
-└── sync_service.rs   # 数据同步服务
+├── main.rs           # 主程序入口，服务启动和信号处理
+├── config.rs         # 配置管理，支持多种连接方式
+├── database.rs       # DuckDB 数据库操作，宽表管理
+├── data_source.rs    # SQL Server 数据源，历史和实时数据获取
+└── sync_service.rs   # 数据同步服务，周期性更新和清理
 ```
 
-### 扩展功能
+### 核心模块说明
 
-- 添加 HTTP API 接口
-- 支持更多数据源类型
-- 实现数据压缩
-- 添加监控指标导出
+#### main.rs
+- 服务启动和初始化
+- 日志系统配置（tracing + 文件滚动）
+- 信号处理（SIGTERM/SIGINT）
+- 异步任务协调
+
+#### config.rs
+- `AppConfig`: 主配置结构体
+- `DatabaseConfig`: 数据库连接配置
+- 支持连接字符串和结构化配置两种模式
+- 配置验证和连接字符串生成
+
+#### database.rs
+- `DatabaseManager`: DuckDB 数据库管理器
+- 宽表创建和动态列管理
+- 数据插入、查询和清理操作
+- 连接池和事务管理
+
+#### data_source.rs
+- `SqlServerDataSource`: SQL Server 数据源
+- 历史数据批量加载
+- TagDatabase 增量数据获取
+- 连接重试和错误处理
+
+#### sync_service.rs
+- `SyncService`: 数据同步服务
+- 周期性更新任务
+- 数据窗口管理和清理
+- 服务状态监控
+
+### 关键设计模式
+
+- **异步编程**: 使用 Tokio 运行时处理并发任务
+- **错误处理**: 使用 `anyhow` 进行统一错误处理
+- **配置管理**: 使用 `serde` 和 `config` crate 进行配置解析
+- **日志记录**: 使用 `tracing` 框架进行结构化日志
+- **数据库抽象**: 封装数据库操作，支持连接池
+
+### 扩展功能建议
+
+- **HTTP API 接口**: 添加 REST API 用于数据查询和状态监控
+- **更多数据源**: 支持 PostgreSQL、InfluxDB 等其他数据源
+- **数据压缩**: 实现历史数据压缩存储
+- **监控指标**: 集成 Prometheus 指标导出
+- **集群支持**: 支持多实例部署和负载均衡
+- **数据验证**: 添加数据质量检查和异常检测
+- **配置热重载**: 支持运行时配置更新
 
 ## 许可证
 

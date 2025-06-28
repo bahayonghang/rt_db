@@ -40,6 +40,8 @@ pub struct AppConfig {
     pub tables: TableConfig,
     /// 连接配置
     pub connection: ConnectionConfig,
+    /// 查询配置
+    pub query: QueryConfig,
 }
 
 /// 数据库连接配置
@@ -194,6 +196,15 @@ pub struct TableConfig {
     pub history_table: String,
     /// TagDatabase 表名
     pub tag_database_table: String,
+}
+
+/// 查询配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct QueryConfig {
+    /// 历史数据查询天数
+    pub days_back: i32,
+    /// 历史数据表名（用于查询）
+    pub history_table: String,
 }
 
 /// 连接配置

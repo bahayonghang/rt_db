@@ -7,13 +7,47 @@ mod test_config;
 use anyhow::Result;
 use std::sync::Arc;
 use tokio::signal; // 已在wait_for_shutdown_signal函数中按需导入
-use tracing::{info, error, warn};
+use tracing::{info, error, warn, debug};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_appender::{rolling, non_blocking};
+use std::fs;
 
 use config::AppConfig;
 use database::DatabaseManager;
 use data_source::SqlServerDataSource;
 use sync_service::SyncService;
+
+/// 检查表结构
+async fn check_table_structure(data_source: &SqlServerDataSource) -> Result<()> {
+    debug!("开始检查表结构...");
+    
+    let mut client = data_source.create_connection_with_retry().await?;
+    
+    // 检查TagDatabase表结构
+    debug!("检查TagDatabase表结构:");
+    let stream = client.query("SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = 'TagDatabase'", &[]).await?;
+    let rows = stream.into_first_result().await?;
+    
+    for row in rows {
+        let column_name: &str = row.get(0).unwrap_or("");
+        let data_type: &str = row.get(1).unwrap_or("");
+        debug!("TagDatabase列名: {}, 类型: {}", column_name, data_type);
+    }
+    
+    // 检查历史表结构
+    debug!("检查历史表结构:");
+    let stream = client.query("SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = '历史表'", &[]).await?;
+    let rows = stream.into_first_result().await?;
+    
+    for row in rows {
+        let column_name: &str = row.get(0).unwrap_or("");
+        let data_type: &str = row.get(1).unwrap_or("");
+        debug!("历史表列名: {}, 类型: {}", column_name, data_type);
+    }
+    
+    debug!("表结构检查完成");
+    Ok(())
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -50,7 +84,7 @@ async fn main() -> Result<()> {
     // 初始化数据库结构
     if let Err(e) = db_manager.initialize() {
         error!("数据库初始化失败: {}", e);
-        return Err(e);
+        return Err(anyhow::anyhow!("数据库初始化失败: {}", e));
     }
     
     // 初始化数据源
@@ -59,7 +93,26 @@ async fn main() -> Result<()> {
     // 测试数据源连接
     if let Err(e) = data_source.test_connection().await {
         error!("数据源连接测试失败: {}", e);
-        return Err(e);
+        return Err(anyhow::anyhow!("数据源连接测试失败: {}", e));
+    }
+    
+    // 检查表结构
+    check_table_structure(&data_source).await?;
+    
+    // 测试历史数据查询功能
+    debug!("开始测试历史数据查询功能...");
+    match data_source.query_history_data(&config.query.history_table, config.query.days_back).await {
+        Ok(records) => {
+            if records.is_empty() {
+                warn!("未找到历史数据");
+            } else {
+                debug!("成功查询到 {} 条历史记录", records.len());
+            }
+        }
+        Err(e) => {
+            error!("查询历史数据失败: {}", e);
+            warn!("历史数据查询失败，但程序将继续运行其他功能");
+        }
     }
     
     // 创建同步服务
@@ -70,15 +123,15 @@ async fn main() -> Result<()> {
     );
     
     // 执行初始数据加载
-    info!("开始初始数据加载...");
+    debug!("开始初始数据加载...");
     if let Err(e) = sync_service.initial_load().await {
         error!("初始数据加载失败: {}", e);
-        return Err(e);
+        return Err(anyhow::anyhow!("初始数据加载失败: {}", e));
     }
     
     // 显示初始状态
     if let Ok(status) = sync_service.get_status().await {
-        info!("\n{}", status);
+        debug!("\n{}", status);
     }
     
     // 启动周期性更新任务
@@ -111,7 +164,7 @@ async fn main() -> Result<()> {
             loop {
                 interval.tick().await;
                 if let Ok(status) = service.get_status().await {
-                    info!("定期状态报告:\n{}", status);
+                    debug!("定期状态报告:\n{}", status);
                 }
             }
         })
@@ -122,7 +175,7 @@ async fn main() -> Result<()> {
     // 等待终止信号
     wait_for_shutdown_signal().await;
     
-    info!("收到终止信号，开始优雅停机...");
+    info!("收到终止信号，开始停机...");
     
     // 取消任务
     update_handle.abort();
@@ -144,17 +197,49 @@ async fn main() -> Result<()> {
 /// 初始化日志系统
 fn init_logging(config: &AppConfig) {
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new(&config.log_level));
+        .unwrap_or_else(|_| EnvFilter::new(&format!("{},tiberius=warn,tokio_util=warn", &config.log_level)));
     
+    // 创建logs目录（如果不存在）
+    fs::create_dir_all("logs").expect("无法创建logs目录");
+    
+    // 设置日志文件，按天滚动
+    let file_appender = rolling::daily("logs", "rt_db.log");
+    let (non_blocking_appender, guard) = non_blocking(file_appender);
+    
+    // 将guard泄漏以保持文件写入器活跃
+    std::mem::forget(guard);
+    
+    // 创建控制台输出层 - 精简格式，使用北京时间
+    let console_layer = fmt::layer()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .with_timer(fmt::time::OffsetTime::new(
+            time::UtcOffset::from_hms(8, 0, 0).unwrap(),
+            time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap()
+        ));
+    
+    // 创建文件输出层 - 精简格式，使用北京时间
+    let file_layer = fmt::layer()
+        .with_target(false)
+        .with_thread_ids(false)
+        .with_file(false)
+        .with_line_number(false)
+        .with_timer(fmt::time::OffsetTime::new(
+            time::UtcOffset::from_hms(8, 0, 0).unwrap(),
+            time::format_description::parse("[year]-[month]-[day] [hour]:[minute]:[second]").unwrap()
+        ))
+        .with_writer(non_blocking_appender);
+    
+    // 注册所有层
     tracing_subscriber::registry()
         .with(filter)
-        .with(fmt::layer()
-            .with_target(false)
-            .with_thread_ids(true)
-            .with_file(true)
-            .with_line_number(true)
-        )
+        .with(console_layer)
+        .with(file_layer)
         .init();
+    
+    info!("日志系统初始化完成，日志文件保存在 logs/rt_db.log");
 }
 
 /// 等待停机信号

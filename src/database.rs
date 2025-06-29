@@ -1,9 +1,8 @@
-use anyhow::Result as AnyhowResult;
+use anyhow::Result;
 use chrono::{DateTime, Utc};
 use duckdb::Connection;
 use std::path::Path;
-use tracing::{info, debug, error};
-use anyhow::Result;
+use tracing::{info, debug, error, warn};
 
 /// 时序数据记录
 #[derive(Debug, Clone)]
@@ -149,6 +148,87 @@ impl DatabaseManager {
         Ok(())
     }
     
+    /// 处理标签变化（加点/少点）
+    pub fn handle_tag_changes(&self, tag_changes: &crate::data_source::TagChanges) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        // 处理新增标签（加点）
+        if !tag_changes.added_tags.is_empty() {
+            info!("处理新增标签: {:?}", tag_changes.added_tags);
+            let new_tags: std::collections::HashSet<String> = tag_changes.added_tags.iter().cloned().collect();
+            self.add_columns_to_wide_table(&new_tags)?;
+            
+            // 更新已知标签集合
+            {
+                let mut known_tags = self.known_tags.lock().unwrap();
+                for tag in &tag_changes.added_tags {
+                    known_tags.insert(tag.clone());
+                }
+            }
+        }
+        
+        // 处理删除标签（少点）
+        if !tag_changes.removed_tags.is_empty() {
+            warn!("检测到删除的标签: {:?}", tag_changes.removed_tags);
+            
+            // 对于删除的标签，我们可以选择：
+            // 1. 保留列但标记为已删除（推荐，保持数据完整性）
+            // 2. 物理删除列（可能导致数据丢失）
+            // 这里采用方案1，只是从已知标签集合中移除，但保留数据库列
+            {
+                let mut known_tags = self.known_tags.lock().unwrap();
+                for tag in &tag_changes.removed_tags {
+                    known_tags.remove(tag);
+                }
+            }
+            
+            // 记录删除的标签信息，便于后续处理
+            info!("已从已知标签集合中移除: {:?}，但保留历史数据列", tag_changes.removed_tags);
+        }
+        
+        Ok(())
+    }
+    
+    /// 获取当前已知的标签列表
+    pub fn get_known_tags(&self) -> std::collections::HashSet<String> {
+        self.known_tags.lock().unwrap().clone()
+    }
+    
+    /// 清理已删除标签的空值数据（可选的维护操作）
+    pub fn cleanup_removed_tag_data(&self, removed_tags: &[String]) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        if removed_tags.is_empty() {
+            return Ok(0);
+        }
+        
+        let conn = self.get_connection()?;
+        let mut total_cleaned = 0;
+        
+        for tag in removed_tags {
+            let safe_column_name = self.sanitize_column_name(tag);
+            
+            // 检查列是否存在
+            let column_exists_sql = format!(
+                "SELECT COUNT(*) FROM pragma_table_info('ts_wide') WHERE name = '{}'",
+                safe_column_name
+            );
+            
+            let column_count: i64 = conn.query_row(&column_exists_sql, [], |row| row.get(0))?;
+            
+            if column_count > 0 {
+                // 将该列的所有值设为NULL（软删除）
+                let update_sql = format!(
+                    "UPDATE ts_wide SET {} = NULL",
+                    safe_column_name
+                );
+                
+                let updated_rows = conn.execute(&update_sql, [])?;
+                total_cleaned += updated_rows;
+                
+                info!("已清理标签 {} 的 {} 条数据记录", tag, updated_rows);
+            }
+        }
+        
+        Ok(total_cleaned)
+    }
+    
     /// 删除给定时间以前的数据
     pub fn delete_data_before_time(&self, cutoff_time: DateTime<Utc>) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         let conn = self.get_connection()?;
@@ -165,37 +245,57 @@ impl DatabaseManager {
         Ok(deleted_rows)
     }
     
-    /// 插入宽表数据
+    /// 插入宽表数据（批量优化版本）
     fn insert_wide_data(
         &self,
         grouped_data: &std::collections::HashMap<DateTime<Utc>, std::collections::HashMap<String, f64>>,
         all_tags: &std::collections::HashSet<String>,
     ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        if grouped_data.is_empty() {
+            return Ok(());
+        }
+
         let conn = self.get_connection()?;
         
-        for (timestamp, tag_values) in grouped_data {
-            // 构建列名和值的列表
-            let mut columns = vec!["DateTime".to_string()];
-            // 直接使用UTC时间，不进行时区转换
-            let mut values = vec![timestamp.format("%Y-%m-%d %H:%M:%S%.3f").to_string()];
-            
-            for tag in all_tags {
-                let safe_column_name = self.sanitize_column_name(tag);
-                columns.push(safe_column_name);
-                let value = tag_values.get(tag).unwrap_or(&0.0);
-                values.push(value.to_string());
-            }
-            
-            // 构建INSERT OR REPLACE SQL (DuckDB语法)
-            let columns_str = columns.join(", ");
-            let placeholders = vec!["?"; columns.len()].join(", ");
-            
+        // 构建列名列表
+        let mut columns = vec!["DateTime".to_string()];
+        for tag in all_tags {
+            let safe_column_name = self.sanitize_column_name(tag);
+            columns.push(safe_column_name);
+        }
+        
+        let columns_str = columns.join(", ");
+        let placeholder = format!("({})", vec!["?"; columns.len()].join(", "));
+        
+        // 将数据转换为向量以便分批处理
+        let mut data_rows: Vec<_> = grouped_data.iter().collect();
+        data_rows.sort_by_key(|(timestamp, _)| *timestamp);
+        
+        // 分批插入数据
+        const BATCH_SIZE: usize = 1000;
+        for chunk in data_rows.chunks(BATCH_SIZE) {
+            // 构建批量插入SQL
+            let placeholders = vec![placeholder.clone(); chunk.len()].join(", ");
             let sql = format!(
-                "INSERT OR REPLACE INTO ts_wide ({}) VALUES ({})",
+                "INSERT OR REPLACE INTO ts_wide ({}) VALUES {}",
                 columns_str, placeholders
             );
             
-            conn.execute(&sql, duckdb::params_from_iter(values.iter()))?;
+            // 准备参数
+            let mut params = Vec::new();
+            for (timestamp, tag_values) in chunk {
+                // 添加时间戳
+                params.push(timestamp.format("%Y-%m-%d %H:%M:%S%.3f").to_string());
+                
+                // 添加标签值
+                for tag in all_tags {
+                    let value = tag_values.get(tag).unwrap_or(&0.0);
+                    params.push(value.to_string());
+                }
+            }
+            
+            // 执行批量插入
+            conn.execute(&sql, duckdb::params_from_iter(params.iter()))?;
         }
         
         Ok(())
@@ -351,9 +451,5 @@ impl DatabaseManager {
         }
     }
     
-    /// 获取所有已知的标签名
-    pub fn get_known_tags(&self) -> Vec<String> {
-        let known_tags = self.known_tags.lock().unwrap();
-        known_tags.iter().cloned().collect()
-    }
+
 }

@@ -2,11 +2,9 @@ mod config;
 mod database;
 mod data_source;
 mod sync_service;
-mod test_config;
 
 use anyhow::Result;
 use std::sync::Arc;
-use tokio::signal; // 已在wait_for_shutdown_signal函数中按需导入
 use tracing::{info, error, warn, debug};
 use tracing_subscriber::{fmt, layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
 use tracing_appender::{rolling, non_blocking};
@@ -54,10 +52,10 @@ async fn main() -> Result<()> {
     // 检查命令行参数
     let args: Vec<String> = std::env::args().collect();
     
-    // 如果参数包含 --test-config，运行配置测试
+    // 如果参数包含 --test-config，运行配置测试// 检查是否运行测试
     if args.len() > 1 && args[1] == "--test-config" {
-        println!("运行配置解析测试...");
-        return test_config::run_all_tests();
+        println!("配置测试功能已移除");
+        return Ok(());
     }
     
     // 加载配置
@@ -99,21 +97,21 @@ async fn main() -> Result<()> {
     // 检查表结构
     check_table_structure(&data_source).await?;
     
-    // 测试历史数据查询功能
-    debug!("开始测试历史数据查询功能...");
-    match data_source.query_history_data(&config.query.history_table, config.query.days_back).await {
-        Ok(records) => {
-            if records.is_empty() {
-                warn!("未找到历史数据");
-            } else {
-                debug!("成功查询到 {} 条历史记录", records.len());
-            }
-        }
-        Err(e) => {
-            error!("查询历史数据失败: {}", e);
-            warn!("历史数据查询失败，但程序将继续运行其他功能");
-        }
-    }
+    // 注释掉测试历史数据查询功能，因为已改为在initial_load中查询过去1小时数据
+    // debug!("开始测试历史数据查询功能...");
+    // match data_source.query_history_data(&config.query.history_table, config.query.days_back).await {
+    //     Ok(records) => {
+    //         if records.is_empty() {
+    //             warn!("未找到历史数据");
+    //         } else {
+    //             debug!("成功查询到 {} 条历史记录", records.len());
+    //         }
+    //     }
+    //     Err(e) => {
+    //         error!("查询历史数据失败: {}", e);
+    //         warn!("历史数据查询失败，但程序将继续运行其他功能");
+    //     }
+    // }
     
     // 创建同步服务
     let mut sync_service = SyncService::new(

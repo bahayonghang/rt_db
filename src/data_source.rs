@@ -7,6 +7,18 @@ use tracing::{info, debug, warn, error};
 use crate::database::TimeSeriesRecord;
 use crate::config::AppConfig;
 use std::time::Duration;
+use std::collections::HashSet;
+
+/// 标签变化信息
+#[derive(Debug, Clone)]
+pub struct TagChanges {
+    /// 新增的标签
+    pub added_tags: Vec<String>,
+    /// 删除的标签
+    pub removed_tags: Vec<String>,
+    /// 当前所有标签
+    pub current_tags: std::collections::HashSet<String>,
+}
 
 /// SQL Server 数据源管理器
 pub struct SqlServerDataSource {
@@ -100,6 +112,36 @@ impl SqlServerDataSource {
         Ok(records)
     }
     
+    /// 按时间范围从历史表加载数据（分批加载优化）
+    pub async fn load_data_in_range(&self, start_time: DateTime<Utc>, end_time: DateTime<Utc>) -> Result<Vec<TimeSeriesRecord>> {
+        debug!("按时间范围加载数据: {} 到 {}", start_time, end_time);
+        
+        let mut client = self.create_connection_with_retry().await?;
+        
+        let sql = format!(
+            "SELECT * FROM [{}] WHERE [DateTime] >= @P1 AND [DateTime] < @P2 ORDER BY [DateTime]",
+            self.config.tables.history_table
+        );
+        
+        let mut query = tiberius::Query::new(sql);
+        query.bind(start_time);
+        query.bind(end_time);
+        
+        let stream = query.query(&mut client).await?;
+        let rows = stream.into_first_result().await?;
+        
+        let mut records = Vec::new();
+        
+        for row in rows {
+            if let Some(record) = self.parse_tagdb_row(row)? {
+                records.push(record);
+            }
+        }
+        
+        debug!("按时间范围加载了 {} 条记录", records.len());
+        Ok(records)
+    }
+    
     /// 从TagDatabase表获取增量数据 - 只查询DateTime、TagName、TagVal三个字段
     pub async fn get_incremental_data(&self, last_timestamp: DateTime<Utc>) -> Result<Vec<TimeSeriesRecord>> {
         debug!("获取增量数据，上次时间戳: {}", last_timestamp);
@@ -166,6 +208,95 @@ impl SqlServerDataSource {
         Ok(records)
     }
     
+    /// 检测TagDatabase表的标签变化（加点/少点）
+    pub async fn detect_tag_changes(&self, known_tags: &std::collections::HashSet<String>) -> Result<TagChanges> {
+        debug!("开始检测TagDatabase表的标签变化");
+        
+        let mut client = self.create_connection_with_retry().await?;
+        
+        // 查询TagDatabase表中所有唯一的TagName
+        let sql = format!(
+            "SELECT DISTINCT [TagName] FROM [{}] WHERE [TagName] IS NOT NULL",
+            self.config.tables.tag_database_table
+        );
+        
+        let query = tiberius::Query::new(sql);
+        let stream = query.query(&mut client).await?;
+        let rows = stream.into_first_result().await?;
+        
+        let mut current_tags = std::collections::HashSet::new();
+        for row in rows {
+            if let Some(tag_name) = row.get::<&str, _>(0) {
+                current_tags.insert(tag_name.trim().to_string());
+            }
+        }
+        
+        // 计算新增和删除的标签
+        let added_tags: Vec<String> = current_tags.difference(known_tags)
+            .cloned()
+            .collect();
+        let removed_tags: Vec<String> = known_tags.difference(&current_tags)
+            .cloned()
+            .collect();
+        
+        let changes = TagChanges {
+            added_tags,
+            removed_tags,
+            current_tags,
+        };
+        
+        if !changes.added_tags.is_empty() {
+            info!("检测到新增标签: {:?}", changes.added_tags);
+        }
+        if !changes.removed_tags.is_empty() {
+            warn!("检测到删除标签: {:?}", changes.removed_tags);
+        }
+        
+        Ok(changes)
+    }
+    
+    /// 获取指定标签的最新数据
+    pub async fn get_specific_tags_data(&self, tag_names: &[String]) -> Result<Vec<TimeSeriesRecord>> {
+        if tag_names.is_empty() {
+            return Ok(Vec::new());
+        }
+        
+        debug!("开始查询指定标签的最新数据: {:?}", tag_names);
+        
+        let mut client = self.create_connection_with_retry().await?;
+        
+        // 构建IN子句
+        let tag_placeholders: Vec<String> = (1..=tag_names.len())
+            .map(|i| format!("@P{}", i))
+            .collect();
+        let in_clause = tag_placeholders.join(", ");
+        
+        let sql = format!(
+            "SELECT [TagName], [TagVal] FROM [{}] WHERE [TagName] IN ({})",
+            self.config.tables.tag_database_table, in_clause
+        );
+        
+        let mut query = tiberius::Query::new(sql);
+        for tag_name in tag_names {
+            query.bind(tag_name.as_str());
+        }
+        
+        let stream = query.query(&mut client).await?;
+        let rows = stream.into_first_result().await?;
+        
+        let mut records = Vec::new();
+        let current_time = Utc::now();
+        
+        for row in rows {
+            if let Some(record) = self.parse_tagdb_current_row(row, current_time)? {
+                records.push(record);
+            }
+        }
+        
+        debug!("获取到 {} 条指定标签数据", records.len());
+        Ok(records)
+    }
+    
     /// 解析日期时间字符串 (格式: "21/5/2024 10:15:01")
     fn parse_datetime_string(&self, datetime_str: &str) -> Result<DateTime<Utc>> {
         // 尝试解析 DD/M/YYYY HH:MM:SS 格式
@@ -184,12 +315,28 @@ impl SqlServerDataSource {
     
     /// 解析简化的数据库行为时序记录 (DateTime, TagName, TagVal)
     fn parse_simplified_row(&self, row: Row) -> Result<Option<TimeSeriesRecord>> {
-        let timestamp: Option<DateTime<Utc>> = row.get(0);
+        // SQL Server的datetime类型应该使用NaiveDateTime获取，然后转换为UTC
+        let timestamp: Option<NaiveDateTime> = row.get(0);
         let tag_name: Option<&str> = row.get(1);
-        let value: Option<f64> = row.get(2);
+        
+        // 尝试获取f64，如果失败则尝试f32并转换
+        let value: Option<f64> = match row.try_get::<f64, _>(2) {
+            Ok(val) => val,
+            Err(_) => {
+                // 如果f64失败，尝试f32并转换为f64
+                match row.try_get::<f32, _>(2) {
+                    Ok(Some(f32_val)) => Some(f32_val as f64),
+                    Ok(None) => None,
+                    Err(e) => {
+                        warn!("无法解析数值字段: {}", e);
+                        None
+                    }
+                }
+            }
+        };
         
         match (timestamp, tag_name) {
-            (Some(ts), Some(tag)) => {
+            (Some(naive_ts), Some(tag)) => {
                 // 处理None值为0.0，保持总行数不变
                 let val = value.unwrap_or(0.0);
                 
@@ -197,7 +344,9 @@ impl SqlServerDataSource {
                 let final_val = if val.is_finite() { val } else { 0.0 };
                 
                 // 假设SQL Server中的时间是北京时间，需要转换为UTC存储
-                let beijing_timestamp = ts - chrono::Duration::hours(8);
+                // 将NaiveDateTime转换为UTC DateTime，然后减去8小时
+                let utc_timestamp = naive_ts.and_utc();
+                let beijing_timestamp = utc_timestamp - chrono::Duration::hours(8);
                 
                 Ok(Some(TimeSeriesRecord {
                     tag_name: tag.trim().to_string(), // 去除标签名的空格
@@ -215,13 +364,28 @@ impl SqlServerDataSource {
     
     /// 解析TagDatabase表的行为时序记录 (DateTime, 标签名, 数值)
     fn parse_tagdb_row(&self, row: Row) -> Result<Option<TimeSeriesRecord>> {
-        let timestamp: Option<chrono::DateTime<chrono::Utc>> = row.get(0);
+        // SQL Server的datetime类型应该使用NaiveDateTime获取
+        let timestamp: Option<NaiveDateTime> = row.get(0);
         let tag_name: Option<&str> = row.get(1);
-        let value: Option<f64> = row.get(2);
+        
+        // 尝试获取f64，如果失败则尝试f32并转换
+        let value: Option<f64> = match row.try_get::<f64, _>(2) {
+            Ok(val) => val,
+            Err(_) => {
+                // 如果f64失败，尝试f32并转换为f64
+                match row.try_get::<f32, _>(2) {
+                    Ok(Some(f32_val)) => Some(f32_val as f64),
+                    Ok(None) => None,
+                    Err(e) => {
+                        warn!("无法解析数值字段: {}", e);
+                        None
+                    }
+                }
+            }
+        };
         
         match (timestamp, tag_name) {
-            (Some(timestamp), Some(tag)) => {
-                
+            (Some(naive_ts), Some(tag)) => {
                 // 处理None值为0.0，保持总行数不变
                 let val = value.unwrap_or(0.0);
                 
@@ -229,7 +393,9 @@ impl SqlServerDataSource {
                 let final_val = if val.is_finite() { val } else { 0.0 };
                 
                 // 假设SQL Server中的时间是北京时间，需要转换为UTC存储
-                let beijing_timestamp = timestamp - chrono::Duration::hours(8);
+                // 将NaiveDateTime转换为UTC DateTime，然后减去8小时
+                let utc_timestamp = naive_ts.and_utc();
+                let beijing_timestamp = utc_timestamp - chrono::Duration::hours(8);
                 
                 Ok(Some(TimeSeriesRecord {
                     tag_name: tag.trim().to_string(), // 去除标签名的空格
@@ -248,7 +414,22 @@ impl SqlServerDataSource {
     /// 解析TagDatabase表当前数据行（只有TagName和TagVal，使用当前时间）
     fn parse_tagdb_current_row(&self, row: Row, current_time: DateTime<Utc>) -> Result<Option<TimeSeriesRecord>> {
         let tag_name: Option<&str> = row.get(0);
-        let value: Option<f64> = row.get(1);
+        
+        // 尝试获取f64，如果失败则尝试f32并转换
+        let value: Option<f64> = match row.try_get::<f64, _>(1) {
+            Ok(val) => val,
+            Err(_) => {
+                // 如果f64失败，尝试f32并转换为f64
+                match row.try_get::<f32, _>(1) {
+                    Ok(Some(f32_val)) => Some(f32_val as f64),
+                    Ok(None) => None,
+                    Err(e) => {
+                        warn!("无法解析数值字段: {}", e);
+                        None
+                    }
+                }
+            }
+        };
         
         match tag_name {
             Some(tag) => {
@@ -275,20 +456,39 @@ impl SqlServerDataSource {
     /// 解析数据库行为时序记录 (保留兼容性)
     fn parse_row(&self, row: Row) -> Result<Option<TimeSeriesRecord>> {
         let tag_name: Option<&str> = row.get(0);
-        let timestamp: Option<DateTime<Utc>> = row.get(1);
-        let value: Option<f64> = row.get(2);
+        // SQL Server的datetime类型应该使用NaiveDateTime获取
+        let timestamp: Option<NaiveDateTime> = row.get(1);
+        
+        // 尝试获取f64，如果失败则尝试f32并转换
+        let value: Option<f64> = match row.try_get::<f64, _>(2) {
+            Ok(val) => val,
+            Err(_) => {
+                // 如果f64失败，尝试f32并转换为f64
+                match row.try_get::<f32, _>(2) {
+                    Ok(Some(f32_val)) => Some(f32_val as f64),
+                    Ok(None) => None,
+                    Err(e) => {
+                        warn!("无法解析数值字段: {}", e);
+                        None
+                    }
+                }
+            }
+        };
         
         match (tag_name, timestamp) {
-            (Some(tag), Some(ts)) => {
+            (Some(tag), Some(naive_ts)) => {
                 // 处理None值为0.0，保持总行数不变
                 let val = value.unwrap_or(0.0);
                 
                 // 过滤无效数值，将其设为0.0
                 let final_val = if val.is_finite() { val } else { 0.0 };
                 
+                // 将NaiveDateTime转换为UTC DateTime
+                let utc_timestamp = naive_ts.and_utc();
+                
                 Ok(Some(TimeSeriesRecord {
                     tag_name: tag.trim().to_string(), // 去除标签名的空格
-                    timestamp: ts,
+                    timestamp: utc_timestamp,
                     value: final_val,
                 }))
             }
@@ -361,7 +561,22 @@ impl SqlServerDataSource {
     fn parse_history_row(&self, row: Row) -> Result<Option<TimeSeriesRecord>> {
         let tag_name: Option<&str> = row.get(0);
         let timestamp: Option<DateTime<Utc>> = row.get(1);
-        let value: Option<f64> = row.get(2); // 直接获取为f64
+        
+        // 尝试获取f64，如果失败则尝试f32并转换
+        let value: Option<f64> = match row.try_get::<f64, _>(2) {
+            Ok(val) => val,
+            Err(_) => {
+                // 如果f64失败，尝试f32并转换为f64
+                match row.try_get::<f32, _>(2) {
+                    Ok(Some(f32_val)) => Some(f32_val as f64),
+                    Ok(None) => None,
+                    Err(e) => {
+                        warn!("无法解析数值字段: {}", e);
+                        None
+                    }
+                }
+            }
+        };
         let _quality: Option<&str> = row.get(3);
         
         match (tag_name, timestamp, value) {

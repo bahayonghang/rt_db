@@ -1,4 +1,4 @@
-use anyhow::{Result as AnyhowResult, anyhow};
+use anyhow::{Result, anyhow};
 use chrono::{DateTime, Utc, Duration};
 use tokio::time::{interval, Duration as TokioDuration};
 use tracing::{info, debug, error, warn};
@@ -6,7 +6,6 @@ use crate::config::AppConfig;
 use crate::database::DatabaseManager;
 use crate::data_source::SqlServerDataSource;
 use std::sync::Arc;
-use anyhow::Result;
 
 /// 标签配置信息
 #[derive(Debug, Clone)]
@@ -39,38 +38,106 @@ impl SyncService {
         }
     }
     
-    /// 执行初始数据加载
+    /// 初始数据加载 - 查询过去1小时的历史数据
     pub async fn initial_load(&mut self) -> Result<()> {
-        info!("开始执行初始数据加载");
+        info!("开始初始数据加载...");
         
-        // 计算起始时间（当前时间 - 数据窗口天数）
         let now = Utc::now();
-        let start_time = now - Duration::days(self.config.data_window_days as i64);
+        // 固定查询过去1小时的数据
+        let one_hour_ago = now - Duration::hours(1);
         
-        debug!("初始数据加载时间范围: {} 到 {}", start_time, now);
+        info!("历史数据时间范围: {} 到 {} (过去1小时)", one_hour_ago, now);
         
-        // 从SQL Server加载数据
-        let records = self.data_source.load_initial_data(start_time).await?;
+        // 查询过去1小时的历史数据
+        let history_data = self.data_source.load_data_in_range(one_hour_ago, now).await
+            .map_err(|e| anyhow!("加载历史数据失败: {}", e))?;
         
-        if records.is_empty() {
-            warn!("未找到初始数据");
-            self.last_seen_timestamp = Some(now);
-            return Ok(());
+        let mut total_loaded = 0;
+        let mut latest_timestamp: Option<DateTime<Utc>> = None;
+        
+        if !history_data.is_empty() {
+            info!("查询到 {} 条历史记录，正在加载...", history_data.len());
+            
+            // 分批处理数据以避免内存溢出
+            let max_memory_records = self.config.batch.max_memory_records;
+            for chunk in history_data.chunks(max_memory_records) {
+                self.db_manager.convert_and_insert_wide(chunk)
+                    .map_err(|e| anyhow!("转换并插入宽表数据失败: {}", e))?;
+                
+                total_loaded += chunk.len();
+                
+                // 更新最新时间戳
+                if let Some(last_record) = chunk.last() {
+                    latest_timestamp = Some(last_record.timestamp);
+                }
+                
+                info!("已加载 {} 条记录，累计: {}", chunk.len(), total_loaded);
+            }
+        } else {
+            info!("过去1小时内无历史数据");
         }
         
-        // 直接转换为宽表格式并插入
-        self.db_manager.convert_and_insert_wide(&records)
-            .map_err(|e| anyhow::anyhow!("转换并插入宽表数据失败: {}", e))?;
+        // 查询TagDatabase中的当前数据
+        info!("开始查询TagDatabase中的当前数据...");
+        let tagdb_data = self.data_source.get_latest_tagdb_data().await
+            .map_err(|e| anyhow!("获取TagDatabase数据失败: {}", e))?;
+        
+        if !tagdb_data.is_empty() {
+            info!("查询到 {} 条TagDatabase记录，正在加载...", tagdb_data.len());
+            
+            // 分批处理TagDatabase数据
+            let max_memory_records = self.config.batch.max_memory_records;
+            for chunk in tagdb_data.chunks(max_memory_records) {
+                self.db_manager.convert_and_insert_wide(chunk)
+                    .map_err(|e| anyhow!("转换并插入TagDatabase数据失败: {}", e))?;
+                
+                total_loaded += chunk.len();
+                
+                // 更新最新时间戳
+                if let Some(last_record) = chunk.last() {
+                    latest_timestamp = Some(last_record.timestamp);
+                }
+                
+                info!("已加载 {} 条TagDatabase记录，累计: {}", chunk.len(), total_loaded);
+            }
+        } else {
+            info!("TagDatabase中无数据");
+        }
         
         // 更新最后见到的时间戳
-        if let Some(last_record) = records.last() {
-            self.last_seen_timestamp = Some(last_record.timestamp);
+        if let Some(timestamp) = latest_timestamp {
+            self.last_seen_timestamp = Some(timestamp);
+        } else {
+            self.last_seen_timestamp = Some(now);
         }
+        
+        // 初始化标签变化检测（建立基线）
+        info!("建立标签变化检测基线...");
+        let known_tags = self.db_manager.get_known_tags();
+        let tag_changes = self.data_source.detect_tag_changes(&known_tags).await
+            .map_err(|e| anyhow!("初始标签检测失败: {}", e))?;
+        
+        // 处理初始标签变化（主要是新增标签）
+        if !tag_changes.added_tags.is_empty() {
+            info!("初始化时发现新标签: {:?}", tag_changes.added_tags);
+            self.db_manager.handle_tag_changes(&tag_changes)
+                .map_err(|e| anyhow!("处理初始标签变化失败: {}", e))?;
+        }
+        
+        // 清理超过3天的旧数据
+        info!("开始清理超过3天的旧数据...");
+        self.cleanup_old_data().await
+            .map_err(|e| anyhow!("清理旧数据失败: {}", e))?;
         
         let record_count = self.db_manager.get_record_count()
             .map_err(|e| anyhow::anyhow!("获取记录总数失败: {}", e))?;
-        info!("初始数据加载完成，共加载 {} 条记录，数据库总记录数: {}，已转换为宽表格式", 
-              records.len(), record_count);
+        
+        if total_loaded > 0 {
+            info!("初始数据加载完成，共加载 {} 条记录，数据库总记录数: {}，已转换为宽表格式", 
+                  total_loaded, record_count);
+        } else {
+            warn!("未找到初始数据");
+        }
         
         Ok(())
     }
@@ -98,7 +165,37 @@ impl SyncService {
     async fn update_cycle(&mut self) -> Result<()> {
         debug!("开始执行更新周期");
         
-        // 获取TagDatabase的最新数据并拼接到宽表
+        // 1. 检测标签变化（加点/少点）
+        let known_tags = self.db_manager.get_known_tags();
+        debug!("当前已知标签数量: {}", known_tags.len());
+        
+        let tag_changes = self.data_source.detect_tag_changes(&known_tags).await
+            .map_err(|e| anyhow!("检测标签变化失败: {}", e))?;
+        
+        info!("标签变化检测结果: 新增 {} 个, 删除 {} 个, 当前总数 {}", 
+              tag_changes.added_tags.len(), 
+              tag_changes.removed_tags.len(), 
+              tag_changes.current_tags.len());
+        
+        // 2. 处理标签变化
+        if !tag_changes.added_tags.is_empty() || !tag_changes.removed_tags.is_empty() {
+            info!("处理标签变化: 新增标签 {:?}, 删除标签 {:?}", 
+                  tag_changes.added_tags, tag_changes.removed_tags);
+            
+            self.db_manager.handle_tag_changes(&tag_changes)
+                .map_err(|e| anyhow!("处理标签变化失败: {}", e))?;
+            
+            // 如果有删除的标签，可选择清理其数据
+            if !tag_changes.removed_tags.is_empty() {
+                let cleaned_count = self.db_manager.cleanup_removed_tag_data(&tag_changes.removed_tags)
+                    .map_err(|e| anyhow!("清理已删除标签数据失败: {}", e))?;
+                if cleaned_count > 0 {
+                    info!("已清理 {} 条已删除标签的数据记录", cleaned_count);
+                }
+            }
+        }
+        
+        // 3. 获取TagDatabase的最新数据并拼接到宽表
         let latest_data = self.fetch_incremental_data().await?;
         
         if !latest_data.is_empty() {
@@ -113,7 +210,7 @@ impl SyncService {
             debug!("TagDatabase表中没有数据");
         }
         
-        // 3. 清理3天前的数据以维持数据库大小
+        // 4. 清理3天前的数据以维持数据库大小
         self.cleanup_old_data().await
             .map_err(|e| anyhow!("清理旧数据失败: {}", e))?;
         

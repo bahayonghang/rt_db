@@ -70,3 +70,17 @@ max_retries = 3
 retry_interval_secs = 5
 # 连接超时，单位为秒
 connection_timeout_secs = 30
+
+# 批量处理配置（性能优化）
+[batch]
+# 批量插入大小（每次插入的记录数）
+# 建议值: 500-2000，根据内存和性能调整
+batch_size = 1000
+# 最大内存记录数（单次加载的最大记录数）
+# 建议值: 10000-100000，根据可用内存调整
+max_memory_records = 50000
+# 是否启用并行插入（提高插入性能）
+enable_parallel_insert = true
+# 历史数据加载批次大小（按天分批）
+# 建议值: 1-7天，根据数据量和内存调整
+history_load_batch_days = 1

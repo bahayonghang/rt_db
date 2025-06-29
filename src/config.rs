@@ -42,6 +42,9 @@ pub struct AppConfig {
     pub connection: ConnectionConfig,
     /// 查询配置
     pub query: QueryConfig,
+    /// 批量处理配置
+    #[serde(default)]
+    pub batch: BatchConfig,
 }
 
 /// 数据库连接配置
@@ -218,6 +221,34 @@ pub struct ConnectionConfig {
     pub connection_timeout_secs: u64,
 }
 
+impl Default for TableConfig {
+    fn default() -> Self {
+        Self {
+            history_table: "History".to_string(),
+            tag_database_table: "TagDatabase".to_string(),
+        }
+    }
+}
+
+impl Default for QueryConfig {
+    fn default() -> Self {
+        Self {
+            days_back: 30,
+            history_table: "History".to_string(),
+        }
+    }
+}
+
+impl Default for ConnectionConfig {
+    fn default() -> Self {
+        Self {
+            max_retries: 3,
+            retry_interval_secs: 5,
+            connection_timeout_secs: 30,
+        }
+    }
+}
+
 impl AppConfig {
     /// 从配置文件加载配置
     pub fn load<P: AsRef<Path>>(config_path: P) -> Result<Self> {
@@ -306,5 +337,47 @@ impl AppConfig {
     /// 获取数据窗口的持续时间（以秒为单位）
     pub fn data_window_duration_secs(&self) -> i64 {
         self.data_window_days as i64 * 24 * 60 * 60
+    }
+}
+
+/// 批量处理配置
+#[derive(Debug, Deserialize, Clone)]
+pub struct BatchConfig {
+    /// 批量插入大小
+    pub batch_size: usize,
+    /// 最大内存记录数
+    pub max_memory_records: usize,
+    /// 是否启用并行插入
+    pub enable_parallel_insert: bool,
+    /// 历史数据加载批次大小（按天）
+    pub history_load_batch_days: u32,
+}
+
+impl Default for BatchConfig {
+    fn default() -> Self {
+        Self {
+            batch_size: 1000,
+            max_memory_records: 50000,
+            enable_parallel_insert: true,
+            history_load_batch_days: 1,
+        }
+    }
+}
+
+impl Default for AppConfig {
+    fn default() -> Self {
+        Self {
+            database_url: None,
+            database: None,
+            database_connection_type: DatabaseConnectionType::default(),
+            update_interval_secs: 60,
+            data_window_days: 30,
+            db_file_path: "rt_db.duckdb".to_string(),
+            log_level: "info".to_string(),
+            tables: TableConfig::default(),
+            connection: ConnectionConfig::default(),
+            query: QueryConfig::default(),
+            batch: BatchConfig::default(),
+        }
     }
 }
